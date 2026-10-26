@@ -1,0 +1,198 @@
+"""Ядро 4-битного matvec для весов «по два в байт» (z80/gen_matvec4n.asm): W2 и выходной слой.
+
+Байт веса — коды двух соседних входов: младший полубайт v = c+7 для чётного входа, старший — для
+нечётного. Таблица кратных разложена так, чтобы адрес собирался из полубайта одной операцией:
+  группа из 32 входов = 4 страницы: [чёт lo][чёт hi][нечёт lo][нечёт hi];
+  чётный вход p-й в группе (p = 0..15):  L = p*16 + v   -> AND 0Fh / OR p*16
+  нечётный вход p-й в группе:            L = v*16 + p   -> AND F0h / OR p
+На два веса: 133 такта (66.5 на вес) против 2x49.5 у «байта на вес» — платим за вдвое меньшую память.
+
+Строки по 16*N байт подряд, выровнены по своей длине (32 или 128 байт): внутри строки хватает INC E.
+"""
+from pathlib import Path
+
+import numpy as np
+
+GROUP = 32          # входов на группу (4 страницы таблицы)
+
+
+def gen(brk: str | None = None) -> str:
+    """brk — метка, куда прыгать по BREAK/SPACE (проверка в начале строки, 32 такта); None — без проверки."""
+    out = []
+    o = out.append
+    o("; сгенерировано tools/gen_matvec4n.py — не править руками")
+    o("; ptn_build: B = число входов (кратно 32, 0 = 256), IX -> входы (слова) -> таблица PTN")
+    o("ptn_build:")
+    o("        ld a,b")
+    o("        ld (ptn_cnt+1),a")
+    o("        ld a,PTN >> 8")
+    o("        ld (ptn_grp+1),a")
+    o("        ld c,0                  ; номер входа в группе (0..31)")
+    if brk:                                       # 256 входов — ~0,1 с: опрос BREAK на каждый вход (A свободен)
+        o("ptn_in: ld a,0x7F")
+        o("        in a,(0xFE)")
+        o("        rra")
+        o(f"        jp nc,{brk}")
+        o("        ld e,(ix+0)")
+    else:
+        o("ptn_in: ld e,(ix+0)")
+    o("        ld d,(ix+1)")
+    o("        inc ix")
+    o("        inc ix")
+    o("        push bc")
+    o("        ; значение для v = 0: -7x")
+    o("        ld h,d")
+    o("        ld l,e")
+    o("        add hl,hl")
+    o("        add hl,hl")
+    o("        add hl,hl")
+    o("        or a")
+    o("        sbc hl,de               ; 7x")
+    o("        ex de,hl                ; DE = 7x, HL = x")
+    o("        ld b,h")
+    o("        ld c,l                  ; BC = x (шаг)")
+    o("        xor a")
+    o("        sub e")
+    o("        ld e,a")
+    o("        sbc a,a")
+    o("        sub d")
+    o("        ld d,a                  ; DE = -7x")
+    o("        pop hl                  ; L = номер в группе")
+    o("        push hl")
+    o("        ld a,l")
+    o("        srl a                   ; p = номер/2, CF = нечётный")
+    o("        jr c,ptn_odd")
+    o("        add a,a")
+    o("        add a,a")
+    o("        add a,a")
+    o("        add a,a                 ; L = p*16")
+    o("        ld l,a")
+    o("ptn_grp: ld a,0                  ; старший байт адреса группы (подставляется)")
+    o("        ld h,a")
+    o("        ld a,15")
+    o("ptn_e:  ld (hl),e")
+    o("        inc h")
+    o("        ld (hl),d")
+    o("        dec h")
+    o("        inc l")
+    o("        ex de,hl")
+    o("        add hl,bc")
+    o("        ex de,hl")
+    o("        dec a")
+    o("        jr nz,ptn_e")
+    o("        jr ptn_next")
+    o("ptn_odd:")
+    o("        ld l,a                  ; L = p, шаг 16")
+    o("        ld a,(ptn_grp+1)")
+    o("        add a,2")
+    o("        ld h,a")
+    o("        ld a,15")
+    o("ptn_o:  ld (hl),e")
+    o("        inc h")
+    o("        ld (hl),d")
+    o("        dec h")
+    o("        ex af,af'")
+    o("        ld a,l")
+    o("        add a,16")
+    o("        ld l,a")
+    o("        ex af,af'")
+    o("        ex de,hl")
+    o("        add hl,bc")
+    o("        ex de,hl")
+    o("        dec a")
+    o("        jr nz,ptn_o")
+    o("ptn_next:")
+    o("        pop bc")
+    o("        inc c")
+    o("        ld a,c")
+    o(f"        cp {GROUP}")
+    o("        jr nz,ptn_same")
+    o("        ld c,0")
+    o("        ld a,(ptn_grp+1)")
+    o("        add a,4")
+    o("        ld (ptn_grp+1),a")
+    o("ptn_same:")
+    o("ptn_cnt: ld a,0")
+    o("        dec a")
+    o("        ld (ptn_cnt+1),a")
+    o("        jp nz,ptn_in")
+    o("        ret")
+    o("")
+    o("; matvec4n: DE -> веса (по 2 в байт), IX -> выход (слова), IYH = строк (0 = 256),")
+    o(";           mv4n_g+2 = групп по 32 входа в строке")
+    o("matvec4n:")
+    o("mv4n_row:")
+    if brk:                                       # BREAK/SPACE в начале каждой строки (A здесь свободен)
+        o("        ld a,0x7F")
+        o("        in a,(0xFE)")
+        o("        rra")
+        o(f"        jp nc,{brk}")
+    o("        ld bc,0")
+    o("        ld a,PTN >> 8")
+    o("        ld (mv4n_h+1),a")
+    o("mv4n_g: ld iyl,0")
+    o("mv4n_grp:")
+    o("mv4n_h: ld h,0")
+    for p in range(16):
+        # чётный вход
+        o("        ld a,(de)")
+        o("        and 0Fh")
+        if p:
+            o(f"        or {p * 16}")
+        o("        ld l,a")
+        o("        ld a,(hl)")
+        o("        add a,c")
+        o("        ld c,a")
+        o("        inc h")
+        o("        ld a,(hl)")
+        o("        adc a,b")
+        o("        ld b,a")
+        o("        inc h")
+        # нечётный вход
+        o("        ld a,(de)")
+        o("        inc e")
+        o("        and 0F0h")
+        if p:
+            o(f"        or {p}")
+        o("        ld l,a")
+        o("        ld a,(hl)")
+        o("        add a,c")
+        o("        ld c,a")
+        o("        inc h")
+        o("        ld a,(hl)")
+        o("        adc a,b")
+        o("        ld b,a")
+        o("        dec h")
+        o("        dec h")
+        o("        dec h")
+    o("        ld a,h")
+    o("        add a,4")
+    o("        ld (mv4n_h+1),a")
+    o("        dec iyl")
+    o("        jp nz,mv4n_grp")
+    o("        ld a,e                  ; строка кончилась на границе страницы — перенос")
+    o("        or a")
+    o("        jr nz,mv4n_nc")
+    o("        inc d")
+    o("mv4n_nc: ld (ix+0),c")
+    o("        ld (ix+1),b")
+    o("        inc ix")
+    o("        inc ix")
+    o("        dec iyh")
+    o("        jp nz,mv4n_row")
+    o("        ret")
+    return "\n".join(out) + "\n"
+
+
+def pack_rows(codes) -> bytes:
+    """codes: строки кодов -7..7, длина кратна 32 -> по два в байт (чётный — младший полубайт)."""
+    codes = np.asarray(codes, dtype=np.int64)
+    assert codes.min() >= -7 and codes.max() <= 7 and codes.shape[1] % GROUP == 0
+    v = codes + 7
+    return (v[:, 0::2] | (v[:, 1::2] << 4)).astype(np.uint8).tobytes()
+
+
+if __name__ == "__main__":
+    dst = Path(__file__).resolve().parent.parent / "z80" / "gen_matvec4n.asm"
+    dst.write_text(gen(), encoding="utf-8")
+    print(dst)

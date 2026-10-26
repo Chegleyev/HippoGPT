@@ -1,0 +1,8 @@
+numpy>=1.26
+pillow>=10
+skoolkit>=10.0
+# torch нужен для ref/export.py (чекпойнт -> целочисленная модель) и для обучения; сборка из build*/intmodel*.pkl
+# и все сверки на стенде работают без него. Для обучения ставьте сборку torch с CUDA под свою видеокарту.
+torch>=2.3
+# необязательно: только чтобы заново собрать data/aug_lists.json (python train/augment.py lists)
+# nltk>=3.8

@@ -1,0 +1,14 @@
+# всё это собирается или скачивается заново (README, «Сборка» и «Обучение заново»)
+build/
+build256/
+runs/
+__pycache__/
+*.pyc
+z80/gen_*
+z80/*.bin
+z80/*.sym
+data/TinyStories*
+data/*.u8
+data/*.u16
+data/*.eos.npy
+.tools/
